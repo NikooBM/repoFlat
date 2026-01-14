@@ -67,7 +67,7 @@ class Driver:
         return True
 
     def _load_state(self):
-        """Cargar estado guardado"""
+        """Cargar estado guardado - MEJORADO con recuperación de sesión activa"""
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, 'rb') as f:
@@ -75,9 +75,38 @@ class Driver:
                     self.current_service = state.get('current_service')
                     self.pending_services = state.get('pending_services', [])
                     self.message_buffer = deque(state.get('messages', []), maxlen=50)
+                    
+                    # NUEVO: Si había sesión activa, intentar recuperarla
+                    if self.current_service:
+                        status = self.current_service.get('status', '')
+                        if status == 'authorized':
+                            self.logger.info(f"📂 Sesión autorizada recuperada: {self.current_service}")
+                            
+                            # Re-solicitar datos de carga actuales
+                            threading.Timer(2.0, self._request_session_update).start()
+                    
                     self.logger.info("📂 Estado recuperado")
             except Exception as e:
                 self.logger.error(f"❌ Error cargando estado: {e}")
+                
+    def _request_session_update(self):
+        """Solicitar actualización de sesión activa (después de reconexión)"""
+        if not self.current_service:
+            return
+        
+        cp_id = self.current_service.get('cp_id')
+        if not cp_id:
+            return
+        
+        self.logger.info(f"🔄 Solicitando actualización de sesión en {cp_id}")
+        
+        # La Central enviará datos automáticamente si la carga está activa
+        # Solo necesitamos asegurarnos de estar escuchando
+        with self.message_lock:
+            msg = f"[{time.strftime('%H:%M:%S')}] 🔄 Reconectado - esperando datos de {cp_id}"
+            self.message_buffer.append(msg)
+            print(f"\n{msg}\n")
+
 
     def _save_state(self):
         """Guardar estado actual"""
@@ -220,7 +249,7 @@ class Driver:
                     pass
 
     def _process_notification(self, data: Dict[str, Any]):
-        """Procesar notificación - CORREGIDO"""
+        """Procesar notificación - MEJORADO con reconexión"""
         # Generar ID único
         msg_id = f"{data.get('status')}_{data.get('cp_id')}_{data.get('session_id', '')}_{int(data.get('timestamp', 0))}"
         
@@ -238,7 +267,27 @@ class Driver:
             msg_type = data.get('type', '')
             cp_id = data.get('cp_id', 'N/A')
             
+            # CRÍTICO: Si recibimos CHARGING_UPDATE y no teníamos sesión activa,
+            # significa que nos reconectamos durante una carga
             if msg_type == 'CHARGING_UPDATE':
+                if not self.current_service or self.current_service.get('status') != 'authorized':
+                    # Recuperar sesión activa
+                    driver_id = data.get('driver_id')
+                    if driver_id == self.driver_id:
+                        self.logger.info(f"🔄 Sesión activa detectada en {cp_id} - recuperando...")
+                        self.current_service = {
+                            'cp_id': cp_id,
+                            'status': 'authorized',
+                            'authorized_at': time.time()
+                        }
+                        self._save_state()
+                        
+                        print(f"\n{'='*60}")
+                        print(f"🔄 SESIÓN RECUPERADA EN {cp_id}")
+                        print(f"{'='*60}")
+                        print("⚡ Carga en progreso detectada")
+                        print(f"{'='*60}\n")
+                
                 # Actualizar datos en tiempo real
                 with self.realtime_lock:
                     self.realtime_data = {
@@ -270,7 +319,6 @@ class Driver:
                 
                 self._save_state()
                 
-                # MOSTRAR CLARAMENTE
                 print(f"\n\n{'='*60}")
                 print(f"{msg}")
                 print(f"{'='*60}")
@@ -295,43 +343,47 @@ class Driver:
                 self.show_clean_prompt.set()
                 self._schedule_next_service()
             
-            # TICKET FINAL - CORREGIDO
-            elif data.get('type') == 'FINAL_TICKET' or 'kw_total' in data:
-                        # Limpiar línea de progreso
-                        print("\n" + " "*100 + "\r", end='', flush=True)
-                        
-                        # Guardar ticket
-                        ticket_data = {
-                            'timestamp': timestamp,
-                            'cp_id': data.get('cp_id'),
-                            'session_id': data.get('session_id'),
-                            'kw_total': float(data.get('kw_total', 0)),
-                            'cost_total': float(data.get('cost_total', 0)),
-                            'exitosa': data.get('exitosa', True),
-                            'razon': data.get('razon', '')
-                        }
-                        
-                        try:
-                            with open(f'/tmp/driver_{self.driver_id}_tickets.json', 'a') as f:
-                                json.dump(ticket_data, f)
-                                f.write('\n')
-                        except:
-                            pass
-                        
-                        # IMPRIMIR TICKET
-                        self._print_ticket(data, timestamp)
-                        
-                        # CRÍTICO: Limpiar estado completamente
-                        self.current_service = None
-                        
-                        with self.realtime_lock:
-                            self.realtime_data = {}
-                        
-                        self._save_state()
-                        self.show_clean_prompt.set()
-                        self._schedule_next_service()
-
-
+            # TICKET FINAL - MEJORADO con validación
+            elif msg_type == 'FINAL_TICKET' or 'kw_total' in data:
+                # Limpiar línea de progreso
+                print("\n" + " "*100 + "\r", end='', flush=True)
+                
+                # VALIDAR que el ticket es para este driver
+                ticket_driver = data.get('driver_id')
+                if ticket_driver != self.driver_id:
+                    self.logger.warning(f"⚠️ Ticket recibido para otro driver: {ticket_driver}")
+                    return
+                
+                # Guardar ticket
+                ticket_data = {
+                    'timestamp': timestamp,
+                    'cp_id': data.get('cp_id'),
+                    'session_id': data.get('session_id'),
+                    'kw_total': float(data.get('kw_total', 0)),
+                    'cost_total': float(data.get('cost_total', 0)),
+                    'exitosa': data.get('exitosa', True),
+                    'razon': data.get('razon', '')
+                }
+                
+                try:
+                    with open(f'/tmp/driver_{self.driver_id}_tickets.json', 'a') as f:
+                        json.dump(ticket_data, f)
+                        f.write('\n')
+                except:
+                    pass
+                
+                # IMPRIMIR TICKET
+                self._print_ticket(data, timestamp)
+                
+                # CRÍTICO: Limpiar estado completamente
+                self.current_service = None
+                
+                with self.realtime_lock:
+                    self.realtime_data = {}
+                
+                self._save_state()
+                self.show_clean_prompt.set()
+                self._schedule_next_service()
             
     def _print_ticket(self, data: Dict[str, Any], timestamp: str):
         """Imprimir ticket de recarga - MEJORADO"""

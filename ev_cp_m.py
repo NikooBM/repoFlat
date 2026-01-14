@@ -413,11 +413,11 @@ class CPMonitor:
 
     def re_authenticate(self) -> bool:
         """
-        RE-AUTENTICACIÓN MANUAL
-        Este método SOLO se llama cuando el usuario ejecuta 'reauth' explícitamente
+        RE-AUTENTICARSE en Central
+        Usado cuando Central revoca la encryption key
         """
         self.logger.info("="*60)
-        self.logger.info("🔄 INICIANDO RE-AUTENTICACIÓN MANUAL")
+        self.logger.info("🔄 INICIANDO RE-AUTENTICACIÓN")
         self.logger.info("="*60)
         
         # Cerrar socket existente
@@ -428,24 +428,28 @@ class CPMonitor:
                 pass
             self.central_socket = None
         
-        # CRÍTICO: NO eliminar encryption key
-        # La key se preserva hasta que Central la revoque explícitamente
-        self.logger.info("💾 Preservando encryption key existente")
+        # Limpiar encryption key antigua
+        try:
+            if os.path.exists(self.key_file):
+                os.remove(self.key_file)
+        except:
+            pass
+        
+        self.encryption_key = None
         
         # Verificar que tenemos password del Registry
         if not self.cp_password:
             self.logger.error("❌ No hay password del Registry")
-            self.logger.error("   El CP debe registrarse primero en Registry")
-            self.logger.error("   Ejecuta el registro con un nuevo Monitor")
+            self.logger.error("   Ejecuta primero el registro en Registry")
             return False
         
-        # Autenticar de nuevo con credenciales existentes
+        # Autenticar de nuevo
         if self._authenticate_with_central():
             self.logger.info("="*60)
             self.logger.info("✅ RE-AUTENTICACIÓN EXITOSA")
             self.logger.info("="*60)
             
-            # Reanudar health checks si no estamos en modo interactivo
+            # Reanudar health checks
             if not self.interactive_mode:
                 threading.Thread(target=self._health_check_loop, daemon=True).start()
             
@@ -456,16 +460,11 @@ class CPMonitor:
             self.logger.error("="*60)
             return False
 
-
     def _health_check_loop(self):
-        """
-        Loop principal - CORREGIDO: NO re-autenticación automática
-        Según PDF: re-autenticación debe ser MANUAL
-        """
+        """Loop principal de health checks - CORREGIDO: NO re-autenticación automática"""
         self.logger.info("🩺 Health checks iniciados")
         
         consecutive_connection_failures = 0
-        manual_reauth_message_shown = False
         
         while self.running:
             try:
@@ -495,18 +494,17 @@ class CPMonitor:
                     if consecutive_connection_failures == 1:
                         self.logger.warning("⚠️ Conexión perdida con Central")
                     
-                    # CRÍTICO: NO RE-AUTENTICAR AUTOMÁTICAMENTE
-                    # Según enunciado: debe ser manual
-                    if consecutive_connection_failures >= 5 and not manual_reauth_message_shown:
-                        self.logger.error("="*60)
-                        self.logger.error("❌ CONEXIÓN CON CENTRAL PERDIDA")
-                        self.logger.error("="*60)
-                        self.logger.error("")
-                        self.logger.error("🔐 PARA RE-AUTENTICARSE:")
-                        self.logger.error("      Ejecuta el comando: reauth")
-                        self.logger.error("="*60)
+                    # CRÍTICO: NO RE-AUTENTICARSE AUTOMÁTICAMENTE
+                    # Según PDF: "debe ser algo manual"
+                    if consecutive_connection_failures >= 5:
+                        self.logger.error("❌ Conexión con Central perdida definitivamente")
+                        self.logger.error("   Ejecuta comando 'reauth' para re-autenticarse")
                         
-                        manual_reauth_message_shown = True
+                        # En modo interactivo, el usuario usa el comando
+                        # En modo no-interactivo, simplemente esperar
+                        if not self.interactive_mode:
+                            # Esperar sin intentar re-autenticar
+                            time.sleep(5)
                     
                     time.sleep(2)
                     continue
@@ -515,7 +513,6 @@ class CPMonitor:
                     if consecutive_connection_failures > 0:
                         self.logger.info("✅ Conexión con Central restaurada")
                         consecutive_connection_failures = 0
-                        manual_reauth_message_shown = False
                 
                 time.sleep(1)
             
@@ -523,8 +520,6 @@ class CPMonitor:
                 if self.running:
                     self.logger.error(f"❌ Error en health loop: {e}")
                     time.sleep(1)
-
-
                 
     def _check_engine_health(self) -> bool:
         """Verificar salud de Engine"""
@@ -553,13 +548,13 @@ class CPMonitor:
 
     def _interactive_loop(self):
         """
-        Modo interactivo - MEJORADO con instrucciones claras
+        Modo interactivo para pruebas y re-autenticación manual
         """
         self.logger.info("\n" + "="*60)
-        self.logger.info("MODO INTERACTIVO - Monitor")
+        self.logger.info("MODO INTERACTIVO")
         self.logger.info("="*60)
         self.logger.info("Comandos disponibles:")
-        self.logger.info("  reauth   - Re-autenticarse en Central (MANUAL)")
+        self.logger.info("  reauth   - Re-autenticarse en Central")
         self.logger.info("  status   - Ver estado de autenticación")
         self.logger.info("  health   - Ver estado de health checks")
         self.logger.info("  quit     - Salir")
@@ -570,7 +565,7 @@ class CPMonitor:
         
         try:
             while self.running:
-                cmd = input(f"[{self.cp_id}-Monitor]> ").strip().lower()
+                cmd = input(f"[{self.cp_id}]> ").strip().lower()
                 
                 if cmd == 'reauth':
                     self.re_authenticate()
@@ -587,13 +582,6 @@ class CPMonitor:
                     if self.encryption_key:
                         print(f"Key hash:           {self.encryption_key[:30]}...")
                     
-                    # Verificar archivo de key
-                    key_file = f'/tmp/{self.cp_id}_encryption_key.txt'
-                    if os.path.exists(key_file):
-                        print(f"Key guardada:       ✅ Sí ({key_file})")
-                    else:
-                        print(f"Key guardada:       ❌ No")
-                    
                     print("="*60 + "\n")
                 
                 elif cmd == 'health':
@@ -609,19 +597,8 @@ class CPMonitor:
                 elif cmd in ('quit', 'exit', 'q'):
                     break
                 
-                elif cmd == 'help':
-                    print("\n" + "="*60)
-                    print("COMANDOS DISPONIBLES")
-                    print("="*60)
-                    print("  reauth   - Re-autenticarse en Central (después de revocación)")
-                    print("  status   - Ver estado completo de autenticación")
-                    print("  health   - Ver estado de Engine y health checks")
-                    print("  help     - Mostrar esta ayuda")
-                    print("  quit     - Salir del Monitor")
-                    print("="*60 + "\n")
-                
                 else:
-                    print(f"❌ Comando desconocido: '{cmd}'. Usa 'help' para ver comandos")
+                    print(f"Comando desconocido: {cmd}")
         
         except (KeyboardInterrupt, EOFError):
             print("\nSaliendo...")

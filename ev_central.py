@@ -755,9 +755,9 @@ class Central:
                                             driver_id,
                                             data.get('kw', 0.0), data.get('cost', 0.0),
                                             cp.get('authenticated', False))
-                        
+                            
     def _handle_charging_complete(self, data: Dict[str, Any]):
-        """Handler de finalización de carga - CORREGIDO para limpiar correctamente"""
+        """Handler de finalización de carga - CORREGIDO para enviar ticket siempre"""
         cp_id = data.get('cp_id', '')
         
         if data.get('encrypted'):
@@ -770,6 +770,8 @@ class Central:
         driver_id = data.get('driver_id', '')
         exitosa = data.get('exitosa', True)
         razon = data.get('razon', '')
+        kw_total = data.get('kw_total', 0)
+        cost_total = data.get('cost_total', 0)
         
         self.logger.info(f"📋 Finalizando sesión {session_id}: {cp_id}")
         
@@ -783,8 +785,8 @@ class Central:
                     session.update({
                         'end_time': int(time.time()), 
                         'cp_id': cp_id,
-                        'kw_consumed': data.get('kw_total', session.get('kw_consumed', 0)),
-                        'total_cost': data.get('cost_total', session.get('total_cost', 0)),
+                        'kw_consumed': kw_total,
+                        'total_cost': cost_total,
                         'exitosa': exitosa, 
                         'razon': razon
                     })
@@ -796,7 +798,6 @@ class Central:
                 
                 # Actualizar estado del CP
                 if cp['status'] in ['CHARGING', 'AVAILABLE']:
-                    # No cambiar si está STOPPED o BROKEN
                     if cp['status'] == 'CHARGING':
                         cp['status'] = 'AVAILABLE'
                         self.db.update_cp_status(cp_id, 'AVAILABLE')
@@ -808,25 +809,52 @@ class Central:
             # Limpiar de ongoing sessions
             if session_id in self.sessions:
                 del self.sessions[session_id]
-                # CRÍTICO: Eliminar de la tabla visual
                 self._enqueue_gui_action('remove_request', session_id)
                 self.logger.info(f"🗑️ Sesión {session_id} eliminada de ongoing")
         
-        # Enviar ticket final al driver
-        self._send_kafka('driver_notifications', {
-            'driver_id': driver_id, 
-            'cp_id': cp_id, 
-            'session_id': session_id,
-            'kw_total': data.get('kw_total', 0), 
-            'cost_total': data.get('cost_total', 0),
-            'exitosa': exitosa, 
-            'razon': razon, 
-            'type': 'FINAL_TICKET', 
-            'timestamp': time.time()
-        })
+        # CRÍTICO: Enviar ticket final SIEMPRE, incluso sin driver_id válido
+        # Esto asegura que el driver reciba notificación
+        if not driver_id:
+            self.logger.warning(f"⚠️ No hay driver_id en sesión {session_id}, buscando en historial...")
+            # Intentar recuperar driver_id de la sesión guardada
+            with self.lock:
+                try:
+                    cursor = self.db.conn.cursor()
+                    cursor.execute('SELECT driver_id FROM sessions WHERE session_id = ?', (session_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        driver_id = row['driver_id']
+                        self.logger.info(f"✅ Driver_id recuperado: {driver_id}")
+                except Exception as e:
+                    self.logger.error(f"❌ Error recuperando driver_id: {e}")
         
-        self.logger.info(f"✅ Carga completada: {session_id}")
-    
+        # Enviar ticket final al driver
+        if driver_id:
+            ticket_payload = {
+                'driver_id': driver_id, 
+                'cp_id': cp_id, 
+                'session_id': session_id,
+                'kw_total': float(kw_total), 
+                'cost_total': float(cost_total),
+                'exitosa': exitosa, 
+                'razon': razon, 
+                'type': 'FINAL_TICKET', 
+                'timestamp': time.time()
+            }
+            
+            # Enviar 2 veces para asegurar recepción (redundancia)
+            self._send_kafka('driver_notifications', ticket_payload)
+            time.sleep(0.1)  # Pequeña pausa
+            self._send_kafka('driver_notifications', ticket_payload)
+            
+            self.logger.info(f"✅ Ticket final enviado a {driver_id} (x2)")
+        else:
+            self.logger.error(f"❌ No se pudo enviar ticket: driver_id desconocido para sesión {session_id}")
+        
+        self.audit.log_event('SESSION', '0.0.0.0', driver_id or 'UNKNOWN', 
+                            'Charging complete', 
+                            f'Session: {session_id}, CP: {cp_id}, Status: {"OK" if exitosa else razon}', 
+                            exitosa)
     def revoke_cp_encryption_key(self, cp_id: str):
         """Revocar encryption key de un CP"""
         with self.lock:
@@ -891,13 +919,24 @@ class Central:
     
     def handle_weather_alert(self, cp_id: str, alert_type: str, temperature: float, city: str):
         """
-        Manejar alerta climática - MEJORADO con actualización de localizaciones
+        Manejar alerta climática - CORREGIDO con actualización persistente
         """
         with self.lock:
-            # NUEVO: Actualizar localización monitoreada
+            # CRÍTICO: Actualizar localización SIEMPRE (incluso en alertas START/END)
             if city and cp_id:
+                old_city = self.weather_locations.get(cp_id)
                 self.weather_locations[cp_id] = city
-                self.logger.info(f"📍 Localización weather actualizada: {cp_id} → {city}")
+                
+                if old_city != city:
+                    self.logger.info(f"📍 Localización weather actualizada: {cp_id} → {city}")
+                
+                # NUEVO: Actualizar inmediatamente en GUI
+                self._enqueue_gui_action('update_weather_location', cp_id, city)
+            
+            if alert_type == 'REGISTER':
+                # Tipo especial solo para registrar localización
+                self.logger.info(f"📍 Localización registrada: {cp_id} → {city}")
+                return
             
             if alert_type == 'START':
                 self.weather_alerts[cp_id] = {
@@ -909,8 +948,6 @@ class Central:
                 self._send_command(cp_id, 'STOP')
                 self.audit.log_weather_alert(cp_id, 'START', temperature)
                 self._enqueue_gui_action('log', f"❄️ Alerta: {cp_id} ({temperature}°C)")
-                
-                self._enqueue_gui_action('update_weather_location', cp_id, city)
             
             elif alert_type == 'END':
                 if cp_id in self.weather_alerts:
@@ -919,7 +956,7 @@ class Central:
                 self._send_command(cp_id, 'RESUME')
                 self.audit.log_weather_alert(cp_id, 'END', temperature)
                 self._enqueue_gui_action('log', f"☀️ Alerta cancelada: {cp_id}")
-    
+                    
     def _send_command(self, cp_id: str, command: str):
         """Enviar comando a CP - CORREGIDO para notificar estado"""
         with self.lock:
@@ -1356,10 +1393,16 @@ class Central:
             self.logger.error(f"Error añadiendo widget {cp_id}: {e}")
     
     def _do_gui_update_cp(self, cp_id: str, status: str, driver: str = "", 
-                          kw: float = 0.0, cost: float = 0.0, authenticated: bool = False):
+                        kw: float = 0.0, cost: float = 0.0, authenticated: bool = False):
+        """Actualizar widget CP - MEJORADO con localización weather"""
         if cp_id in self.cp_widgets:
             try:
                 self.cp_widgets[cp_id].actualizar(status, driver, kw, cost, authenticated)
+                
+                # NUEVO: Actualizar localización si existe
+                if cp_id in self.weather_locations:
+                    city = self.weather_locations[cp_id]
+                    self._do_gui_update_weather_location(cp_id, city)
             except Exception as e:
                 self.logger.error(f"Error actualizando widget {cp_id}: {e}")
     
