@@ -203,7 +203,7 @@ class CPWidget(tk.Frame):
     
     def actualizar(self, status: str, driver_id: str = "", kw: float = 0.0, 
                 cost: float = 0.0, authenticated: bool = False):
-        """Actualizar widget - CORREGIDO: orden correcto de etiquetas"""
+        """Actualizar widget: orden correcto de etiquetas"""
         try:
             color = self.COLORS.get(status, '#95a5a6')
             self.config(bg=color)
@@ -458,7 +458,7 @@ class Central:
             return True  # Modo degradado
     
     def _handle_monitor(self, sock: socket.socket, client_ip: str):
-        """Handler de Monitor con verificación de credenciales"""
+        """Handler de Monitor con verificación de credenciales """
         cp_id: Optional[str] = None
         
         try:
@@ -482,7 +482,10 @@ class Central:
                         return
                     
                     with self.lock:
-                        if cp_id not in self.charging_points:
+                        is_new_cp = cp_id not in self.charging_points
+                        
+                        if is_new_cp:
+                            # CP NUEVO
                             self.charging_points[cp_id] = {
                                 'location': location, 'price': price, 'status': 'AVAILABLE',
                                 'socket': sock, 'session': None, 'last_seen': time.time(),
@@ -491,9 +494,16 @@ class Central:
                             }
                             self.db.save_cp(cp_id, location, price)
                             self.logger.info(f"✅ {cp_id} NUEVO y VERIFICADO")
+                            
+                            # CRÍTICO: Actualizar GUI INMEDIATAMENTE
                             self._enqueue_gui_action('log', f"✅ {cp_id} registrado")
                             self._enqueue_gui_action('add_cp', cp_id, location, price)
+                            
+                            # NUEVO: Forzar procesamiento inmediato de GUI
+                            if self.root:
+                                self.root.update_idletasks()
                         else:
+                            # CP EXISTENTE RECONECTANDO
                             cp_data = self.charging_points[cp_id]
                             if cp_data.get('session'):
                                 self._abort_session(cp_id, 'CP reconectado')
@@ -509,7 +519,7 @@ class Central:
                     if not encryption_key:
                         encryption_key = CryptoManager.generate_key()
                         self.db.save_cp_credentials(cp_id, encryption_key)
-                        self.logger.info(f"🔑 Nueva clave: {cp_id}")
+                        self.logger.info(f"🔑 Nueva clave generada: {cp_id}")
                     
                     self.db.mark_cp_authenticated(cp_id)
                     with self.lock:
@@ -520,13 +530,22 @@ class Central:
                     
                     self.audit.log_authentication(cp_id, client_ip, True, 'FULL_AUTH')
                     self._enqueue_gui_action('log', f"🔐 {cp_id} autenticado")
+                    
+                    # CRÍTICO: Actualizar widget inmediatamente
                     self._enqueue_gui_action('update_cp', cp_id, 'AVAILABLE', '', 0, 0, True)
                     self.db.update_cp_status(cp_id, 'AVAILABLE')
+                    
+                    # NUEVO: Procesar cola de GUI inmediatamente
+                    if self.root:
+                        self._process_gui_queue()
+                        self.root.update()
                     
                     self._monitor_health_loop(cp_id, sock)
         
         except Exception as e:
             self.logger.error(f"❌ Monitor {cp_id}: {e}")
+            import traceback
+            traceback.print_exc()
             if cp_id:
                 self.audit.log_error('MONITOR_ERROR', cp_id, str(e))
         finally:
@@ -552,9 +571,9 @@ class Central:
                 sock.close()
             except:
                 pass
-    
+            
     def _monitor_health_loop(self, cp_id: str, sock: socket.socket):
-        """Loop de health checks - CORREGIDO: detección robusta de averías"""
+        """Loop de health checks: detección robusta de averías"""
         sock.settimeout(15)
         last_health_ok = time.time()
         last_failure_log = 0  # Para evitar spam de logs
@@ -708,7 +727,7 @@ class Central:
             self._enqueue_gui_action('log', f"✅ {driver_id} en {cp_id}")
     
     def _handle_charging_data(self, data: Dict[str, Any]):
-        """Handler de datos de carga - CORREGIDO para enviar a Driver"""
+        """Handler de datos de carga"""
         cp_id = data.get('cp_id', '')
         
         if data.get('encrypted'):
@@ -757,7 +776,7 @@ class Central:
                                             cp.get('authenticated', False))
                             
     def _handle_charging_complete(self, data: Dict[str, Any]):
-        """Handler de finalización de carga - CORREGIDO para enviar ticket siempre"""
+        """Handler de finalización de carga"""
         cp_id = data.get('cp_id', '')
         
         if data.get('encrypted'):
@@ -919,7 +938,7 @@ class Central:
     
     def handle_weather_alert(self, cp_id: str, alert_type: str, temperature: float, city: str):
         """
-        Manejar alerta climática - CORREGIDO con actualización persistente
+        Manejar alerta climática
         """
         with self.lock:
             # CRÍTICO: Actualizar localización SIEMPRE (incluso en alertas START/END)
@@ -958,7 +977,7 @@ class Central:
                 self._enqueue_gui_action('log', f"☀️ Alerta cancelada: {cp_id}")
                     
     def _send_command(self, cp_id: str, command: str):
-        """Enviar comando a CP - CORREGIDO para notificar estado"""
+        """Enviar comando a CP"""
         with self.lock:
             if cp_id not in self.charging_points:
                 self.logger.warning(f"⚠️ CP {cp_id} no existe")
@@ -1030,7 +1049,7 @@ class Central:
         self.audit.log_error('SESSION_ABORTED', cp_id, f'Razón: {razon}')
     
     def _handle_cp_failure(self, cp_id: str):
-        """Manejar fallo de CP - CORREGIDO para evitar spam de avisos"""
+        """Manejar fallo de CP"""
         with self.lock:
             if cp_id not in self.charging_points:
                 return
@@ -1161,7 +1180,7 @@ class Central:
 
     def _do_gui_update_weather_location(self, cp_id: str, city: str):
         """
-        Actualizar localización weather en GUI - CORREGIDO
+        Actualizar localización weather en GUI
         Sin atributos dinámicos, usando diccionario
         """
         if cp_id in self.cp_widgets:
@@ -1189,9 +1208,9 @@ class Central:
         # Log en el área de mensajes
         self._do_log(f"🌡️ EV_W monitoreando {city} para {cp_id}")
 
-    
+        
     def _init_gui(self):
-        """Inicializar GUI completa"""
+        """Inicializar GUI completa - CORRECCIÓN DEFINITIVA"""
         self.root = tk.Tk()
         self.root.title("EVCharging - CENTRAL (RELEASE 2 - COMPLETO)")
         self.root.geometry("1400x950")
@@ -1205,7 +1224,7 @@ class Central:
         tk.Label(header, text="*** EV CHARGING - CENTRAL (RELEASE 2 - COMPLETO) ***",
                 font=('Arial', 16, 'bold'), bg='#1a252f', fg='#ecf0f1').pack(pady=20)
         
-        # CPs
+        # CPs CONTAINER
         cp_container = tk.Frame(self.root, bg='#34495e')
         cp_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
@@ -1213,7 +1232,7 @@ class Central:
         scrollbar = ttk.Scrollbar(cp_container, orient="vertical", command=canvas.yview)
         self.scrollable_frame = tk.Frame(canvas, bg='#34495e')
         self.scrollable_frame.bind("<Configure>", 
-                                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+                                lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1230,48 +1249,46 @@ class Central:
                 font=('Arial', 11, 'bold'), bg='#1a252f', fg='white').pack(pady=5)
         
         self.requests_table = ttk.Treeview(req_frame, 
-                                          columns=("DATE", "TIME", "USER", "CP"),
-                                          show='headings', height=3)
+                                        columns=("DATE", "TIME", "USER", "CP"),
+                                        show='headings', height=3)
         for col in ["DATE", "TIME", "USER", "CP"]:
             self.requests_table.heading(col, text=col)
             self.requests_table.column(col, width=150, anchor=tk.CENTER)
         self.requests_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        # COMANDOS (CON SEGURIDAD)
+        # COMANDOS
         cmd_frame = tk.Frame(self.root, bg='#1a252f', height=120)
         cmd_frame.pack(fill=tk.X, padx=10, pady=5)
         cmd_frame.pack_propagate(False)
         tk.Label(cmd_frame, text="*** CENTRAL COMMANDS ***", 
                 font=('Arial', 11, 'bold'), bg='#1a252f', fg='white').pack(pady=5)
         
-        # Primera fila
         btn_frame1 = tk.Frame(cmd_frame, bg='#1a252f')
         btn_frame1.pack()
         tk.Button(btn_frame1, text="⛔ PARAR CP", command=self._cmd_stop_cp, 
-                 bg='#e74c3c', fg='white', font=('Arial', 10, 'bold'), 
-                 width=14).pack(side=tk.LEFT, padx=5)
+                bg='#e74c3c', fg='white', font=('Arial', 10, 'bold'), 
+                width=14).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame1, text="▶️ REANUDAR CP", command=self._cmd_resume_cp, 
-                 bg='#2ecc71', fg='white', font=('Arial', 10, 'bold'), 
-                 width=14).pack(side=tk.LEFT, padx=5)
+                bg='#2ecc71', fg='white', font=('Arial', 10, 'bold'), 
+                width=14).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame1, text="⛔ PARAR TODOS", command=self._cmd_stop_all, 
-                 bg='#c0392b', fg='white', font=('Arial', 10, 'bold'), 
-                 width=14).pack(side=tk.LEFT, padx=5)
+                bg='#c0392b', fg='white', font=('Arial', 10, 'bold'), 
+                width=14).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame1, text="▶️ REANUDAR TODOS", command=self._cmd_resume_all, 
-                 bg='#27ae60', fg='white', font=('Arial', 10, 'bold'), 
-                 width=14).pack(side=tk.LEFT, padx=5)
+                bg='#27ae60', fg='white', font=('Arial', 10, 'bold'), 
+                width=14).pack(side=tk.LEFT, padx=5)
         
-        # Segunda fila (SEGURIDAD)
         btn_frame2 = tk.Frame(cmd_frame, bg='#1a252f')
         btn_frame2.pack(pady=5)
         tk.Button(btn_frame2, text="🔒 REVOCAR CLAVE CP", command=self._cmd_revoke_key, 
-                 bg='#9b59b6', fg='white', font=('Arial', 10, 'bold'), 
-                 width=18).pack(side=tk.LEFT, padx=5)
+                bg='#9b59b6', fg='white', font=('Arial', 10, 'bold'), 
+                width=18).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame2, text="🔒 REVOCAR TODAS", command=self._cmd_revoke_all_keys, 
-                 bg='#8e44ad', fg='white', font=('Arial', 10, 'bold'), 
-                 width=18).pack(side=tk.LEFT, padx=5)
+                bg='#8e44ad', fg='white', font=('Arial', 10, 'bold'), 
+                width=18).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame2, text="🔐 LISTAR CLAVES", command=self._cmd_list_keys, 
-                 bg='#3498db', fg='white', font=('Arial', 10, 'bold'), 
-                 width=18).pack(side=tk.LEFT, padx=5)
+                bg='#3498db', fg='white', font=('Arial', 10, 'bold'), 
+                width=18).pack(side=tk.LEFT, padx=5)
         
         # LOGS
         log_frame = tk.Frame(self.root, bg='#1a252f', height=100)
@@ -1280,20 +1297,60 @@ class Central:
         tk.Label(log_frame, text="*** MESSAGES ***", 
                 font=('Arial', 11, 'bold'), bg='#1a252f', fg='white').pack(pady=5)
         self.log_text = scrolledtext.ScrolledText(log_frame, height=3, bg='#2c3e50',
-                                                  fg='#ecf0f1', font=('Courier', 9))
+                                                fg='#ecf0f1', font=('Courier', 9))
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        # Cargar CPs existentes
-        with self.lock:
-            for cp_id, cp_data in self.charging_points.items():
-                self._do_gui_add_cp(cp_id, cp_data['location'], cp_data['price'])
-                self._do_gui_update_cp(cp_id, 'DISCONNECTED', '', 0, 0, False)
+        # CRÍTICO: Procesar actualizaciones pendientes ANTES de cargar CPs
+        self.root.update_idletasks()
+        self.root.update()
         
-        # Iniciar procesamiento de cola
+        # Cargar CPs existentes DESPUÉS de que la GUI esté completamente lista
+        self.logger.info("="*60)
+        self.logger.info("CARGANDO CPs EXISTENTES EN GUI")
+        self.logger.info("="*60)
+        
+        with self.lock:
+            cp_count = len(self.charging_points)
+            self.logger.info(f"Total CPs a cargar: {cp_count}")
+            
+            for idx, (cp_id, cp_data) in enumerate(self.charging_points.items(), 1):
+                self.logger.info(f"[{idx}/{cp_count}] Cargando {cp_id}...")
+                
+                try:
+                    # Crear widget directamente (sin cola)
+                    widget = CPWidget(self.frame_cps, cp_id, cp_data['location'], cp_data['price'])
+                    num = len(self.cp_widgets)
+                    widget.grid(row=num//5, column=num%5, padx=10, pady=10)
+                    self.cp_widgets[cp_id] = widget
+                    
+                    # Actualizar estado
+                    widget.actualizar(
+                        cp_data['status'], 
+                        '', 
+                        0, 
+                        0, 
+                        cp_data.get('authenticated', False)
+                    )
+                    
+                    self.logger.info(f"  ✅ {cp_id} cargado (estado: {cp_data['status']})")
+                    
+                    # Forzar actualización
+                    self.root.update_idletasks()
+                    
+                except Exception as e:
+                    self.logger.error(f"  ❌ Error cargando {cp_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
+        
+        self.logger.info("="*60)
+        self.logger.info(f"✅ GUI LISTA - {len(self.cp_widgets)} CPs mostrados")
+        self.logger.info("="*60)
+        
+        # Iniciar procesamiento de cola para actualizaciones futuras
         self.root.after(100, self._process_gui_queue)
         
         self.root.mainloop()
-    
+            
     def _cmd_stop_cp(self):
         cp_id = simpledialog.askstring("Parar CP", "ID del CP:")
         if cp_id and cp_id in self.charging_points:
@@ -1382,19 +1439,35 @@ class Central:
                 pass
     
     def _do_gui_add_cp(self, cp_id: str, location: str, price: float):
-        if cp_id in self.cp_widgets or not self.frame_cps:
+        """Añadir CP a GUI - CON LOGGING DETALLADO"""
+        if cp_id in self.cp_widgets:
+            self.logger.warning(f"⚠️ Widget {cp_id} ya existe, ignorando")
             return
+        
+        if not self.frame_cps:
+            self.logger.error(f"❌ frame_cps no está inicializado, no se puede añadir {cp_id}")
+            return
+        
         try:
+            self.logger.info(f"🔨 Creando widget para {cp_id}...")
             widget = CPWidget(self.frame_cps, cp_id, location, price)
             num = len(self.cp_widgets)
             widget.grid(row=num//5, column=num%5, padx=10, pady=10)
             self.cp_widgets[cp_id] = widget
+            
+            self.logger.info(f"✅ Widget {cp_id} creado (posición grid: {num//5},{num%5})")
+            
+            # Forzar actualización visual
+            self.frame_cps.update_idletasks()
+            
         except Exception as e:
-            self.logger.error(f"Error añadiendo widget {cp_id}: {e}")
+            self.logger.error(f"❌ Error creando widget {cp_id}: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _do_gui_update_cp(self, cp_id: str, status: str, driver: str = "", 
                         kw: float = 0.0, cost: float = 0.0, authenticated: bool = False):
-        """Actualizar widget CP - MEJORADO con localización weather"""
+        """Actualizar widget CP - con localización weather"""
         if cp_id in self.cp_widgets:
             try:
                 self.cp_widgets[cp_id].actualizar(status, driver, kw, cost, authenticated)

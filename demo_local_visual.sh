@@ -1,5 +1,5 @@
 #!/bin/bash
-# demo_local_visual.sh - CORREGIDO
+# demo_local_visual.sh
 
 echo "=============================================="
 echo "EVCharging - Demo LOCAL (1 PC)"
@@ -62,7 +62,7 @@ for i in $(seq 1 $NUM_CPS); do
     
     sleep 2
     
-    docker run -d \
+    docker run -d -it \
         --name ${CP_ID}-monitor \
         --network evcharging_net \
         -e CP_ID=$CP_ID \
