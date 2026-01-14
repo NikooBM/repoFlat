@@ -265,6 +265,11 @@ class Central:
         self.audit = AuditLogger('audit.log')
         
         self.weather_alerts = {}
+        # NUEVO: Diccionario de localizaciones weather
+        self.weather_locations: Dict[str, str] = {}  # {cp_id: city_name}
+        # NUEVO: Diccionario para trackear weather labels
+        self.weather_labels: Dict[str, tk.Label] = {}  # {cp_id: label_widget}
+        
         self.charging_points: Dict[str, Dict[str, Any]] = {}
         self.sessions: Dict[str, Dict[str, Any]] = {}
         self.pending_commands: Dict[str, str] = {}
@@ -873,21 +878,32 @@ class Central:
         return count
     
     def handle_weather_alert(self, cp_id: str, alert_type: str, temperature: float, city: str):
-        """Manejar alerta climática"""
+        """
+        Manejar alerta climática - MEJORADO con actualización de localizaciones
+        """
         with self.lock:
+            # NUEVO: Actualizar localización monitoreada
+            if city and cp_id:
+                self.weather_locations[cp_id] = city
+                self.logger.info(f"📍 Localización weather actualizada: {cp_id} → {city}")
+            
             if alert_type == 'START':
                 self.weather_alerts[cp_id] = {
-                    'temperature': temperature, 'city': city, 'started_at': time.time()
+                    'temperature': temperature, 
+                    'city': city, 
+                    'started_at': time.time()
                 }
                 self.logger.warning(f"❄️ ALERTA: {cp_id} ({city}) - {temperature}°C")
                 self._send_command(cp_id, 'STOP')
                 self.audit.log_weather_alert(cp_id, 'START', temperature)
                 self._enqueue_gui_action('log', f"❄️ Alerta: {cp_id} ({temperature}°C)")
+                
+                self._enqueue_gui_action('update_weather_location', cp_id, city)
             
             elif alert_type == 'END':
                 if cp_id in self.weather_alerts:
                     del self.weather_alerts[cp_id]
-                self.logger.info(f"☀️ ALERTA CANCELADA: {cp_id}")
+                self.logger.info(f"☀️ ALERTA CANCELADA: {cp_id} ({city})")
                 self._send_command(cp_id, 'RESUME')
                 self.audit.log_weather_alert(cp_id, 'END', temperature)
                 self._enqueue_gui_action('log', f"☀️ Alerta cancelada: {cp_id}")
@@ -1084,11 +1100,46 @@ class Central:
                         self._do_gui_add_request(*args)
                     elif action == 'remove_request':
                         self._do_gui_remove_request(args[0])
+                    # NUEVO: Actualizar localización weather
+                    elif action == 'update_weather_location':
+                        self._do_gui_update_weather_location(args[0], args[1])
                 except:
                     break
         finally:
             if self.root and self.running:
                 self.root.after(100, self._process_gui_queue)
+
+
+    def _do_gui_update_weather_location(self, cp_id: str, city: str):
+        """
+        Actualizar localización weather en GUI - CORREGIDO
+        Sin atributos dinámicos, usando diccionario
+        """
+        if cp_id in self.cp_widgets:
+            try:
+                widget = self.cp_widgets[cp_id]
+                
+                # CORRECCIÓN: Usar diccionario en vez de atributo dinámico
+                if cp_id in self.weather_labels:
+                    # Actualizar label existente
+                    self.weather_labels[cp_id].config(text=f"🌡️ Monitoreado: {city}")
+                    self.logger.debug(f"Weather label actualizado para {cp_id}")
+                else:
+                    # Crear nuevo label
+                    lbl = tk.Label(widget, text=f"🌡️ Monitoreado: {city}",
+                                  font=('Arial', 8), fg='white', bg=widget.cget('bg'))
+                    lbl.pack(pady=2)
+                    
+                    # Guardar referencia en diccionario
+                    self.weather_labels[cp_id] = lbl
+                    self.logger.debug(f"Nuevo weather label creado para {cp_id}")
+                    
+            except Exception as e:
+                self.logger.error(f"Error actualizando weather location en GUI: {e}")
+        
+        # Log en el área de mensajes
+        self._do_log(f"🌡️ EV_W monitoreando {city} para {cp_id}")
+
     
     def _init_gui(self):
         """Inicializar GUI completa"""
