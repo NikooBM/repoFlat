@@ -761,21 +761,18 @@ class ChargingPointEngine:
         print("="*60)
     
     def _interactive_mode(self):
-        """Modo interactivo - CORREGIDO manejo de 'q' y sesión recuperada"""
+        """Modo interactivo - CORREGIDO para detectar '2' durante carga"""
         self._show_help()
         
-        # CORRECCIÓN: Si hay sesión recuperada y se está cargando, no mostrar prompt
+        # CORRECCIÓN: Si hay sesión recuperada en progreso, notificar
         if self.recovering_session and self.state == 'CHARGING':
             print("\n⚡ Carga en progreso (sesión recuperada)...")
             print("💡 Pulsa '2' para finalizar la carga\n")
         
         try:
             while self.running:
-                # CORRECCIÓN: No solicitar comando si está cargando automáticamente
-                if self.state == 'CHARGING' and not self.recovering_session:
-                    # Ya está cargando manualmente o por autorización
-                    time.sleep(1)
-                    continue
+                # CRÍTICO: SIEMPRE pedir comando, incluso si está cargando
+                # (el usuario necesita poder pulsar '2')
                 
                 cmd = input(f"\n[{self.cp_id}]> ").strip().lower()
                 

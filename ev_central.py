@@ -708,7 +708,7 @@ class Central:
             self._enqueue_gui_action('log', f"✅ {driver_id} en {cp_id}")
     
     def _handle_charging_data(self, data: Dict[str, Any]):
-        """Handler de datos de carga - CORREGIDO para actualizar BD en tiempo real"""
+        """Handler de datos de carga - CORREGIDO para enviar a Driver"""
         cp_id = data.get('cp_id', '')
         
         if data.get('encrypted'):
@@ -724,8 +724,9 @@ class Central:
                     # Actualizar sesión en memoria
                     cp['session']['kw_consumed'] = data.get('kw', 0.0)
                     cp['session']['total_cost'] = data.get('cost', 0.0)
+                    driver_id = cp['session'].get('driver_id', '')
                     
-                    # CRÍTICO: Actualizar también en base de datos
+                    # Actualizar BD
                     try:
                         session_id = cp['session'].get('session_id')
                         if session_id:
@@ -738,12 +739,23 @@ class Central:
                     except Exception as e:
                         self.logger.error(f"Error actualizando sesión en BD: {e}")
                     
+                    # CRÍTICO: Reenviar al Driver para que vea el progreso
+                    if driver_id:
+                        self._send_kafka('driver_notifications', {
+                            'driver_id': driver_id,
+                            'cp_id': cp_id,
+                            'kw': data.get('kw', 0.0),
+                            'cost': data.get('cost', 0.0),
+                            'type': 'CHARGING_UPDATE',
+                            'timestamp': time.time()
+                        })
+                    
                     # Actualizar GUI con progreso
                     self._enqueue_gui_action('update_cp', cp_id, 'CHARGING', 
-                                            data.get('driver_id', ''),
+                                            driver_id,
                                             data.get('kw', 0.0), data.get('cost', 0.0),
                                             cp.get('authenticated', False))
-                    
+                        
     def _handle_charging_complete(self, data: Dict[str, Any]):
         """Handler de finalización de carga - CORREGIDO para limpiar correctamente"""
         cp_id = data.get('cp_id', '')

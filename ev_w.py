@@ -42,7 +42,20 @@ class WeatherControlOffice:
         self.alerts[cp_id] = False
         self.last_temperatures[cp_id] = None
         logger.info(f"📍 Añadida localización: {cp_id} → {city}")
-    
+
+        try:
+            endpoint = f"{self.central_api_url}/api/v1/weather/alert"
+            payload = {
+                'cp_id': cp_id,
+                'alert_type': 'REGISTER',  # Tipo especial para registro
+                'temperature': 999.0,  # Dummy
+                'city': city
+            }
+            requests.post(endpoint, json=payload, timeout=5)
+            logger.info(f"✅ Localización notificada a Central: {cp_id} → {city}")
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo notificar localización: {e}")
+
     def remove_location(self, cp_id: str):
         """Eliminar una localización"""
         if cp_id in self.locations:

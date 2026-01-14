@@ -275,6 +275,9 @@ class CentralAPI:
                 self.weather_locations[cp_id] = city
                 logger.info(f"📍 Localización weather registrada: {cp_id} → {city}")
             
+            if alert_type == 'REGISTER':
+                    return True
+                
             if alert_type == 'START':
                 # Iniciar alerta
                 self.weather_alerts[cp_id] = {
